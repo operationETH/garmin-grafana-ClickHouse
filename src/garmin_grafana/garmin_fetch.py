@@ -1,5 +1,6 @@
 # %%
 import traceback
+import json
 import re
 import base64, requests, time, pytz, logging, os, sys, dotenv, io, zipfile
 from fitparse import FitFile, FitParseError
@@ -42,6 +43,12 @@ INFLUXDB_PASSWORD = os.getenv("INFLUXDB_PASSWORD", 'influxdb_access_password') #
 INFLUXDB_DATABASE = os.getenv("INFLUXDB_DATABASE", 'GarminStats') # Required
 INFLUXDB_V3_ACCESS_TOKEN = os.getenv("INFLUXDB_V3_ACCESS_TOKEN",'') # InfluxDB V3 Access token, required only for InfluxDB V3
 INFLUXDB_ORG = os.getenv("INFLUXDB_ORG", 'default') # required only for InfluxDB V3 
+CLICKHOUSE_DUAL_WRITE = True if os.getenv("CLICKHOUSE_DUAL_WRITE") in ['True', 'true', 'TRUE','t', 'T', 'yes', 'Yes', 'YES', '1'] else False
+CLICKHOUSE_HOST = os.getenv("CLICKHOUSE_HOST", "clickhouse.clickhouse.svc.cluster.local")
+CLICKHOUSE_PORT = int(os.getenv("CLICKHOUSE_PORT", 8123))
+CLICKHOUSE_DATABASE = os.getenv("CLICKHOUSE_DATABASE", "garmin")
+CLICKHOUSE_USER = os.getenv("CLICKHOUSE_USER", "")
+CLICKHOUSE_PASSWORD = os.getenv("CLICKHOUSE_PASSWORD", "")
 TOKEN_DIR = os.getenv("TOKEN_DIR", "~/.garminconnect") # optional
 GARMINCONNECT_EMAIL = (os.environ.get("GARMINCONNECT_EMAIL") or "").strip() or None # optional, asks in prompt on run if not provided
 _garmin_pw_b64 = os.getenv("GARMINCONNECT_BASE64_PASSWORD")
@@ -191,6 +198,65 @@ def _is_http_status_error(err, status_code):
     return re.search(rf"\b{status_code}\b", str(err)) is not None
 
 # %%
+def write_daily_stats_to_clickhouse(points):
+    if not CLICKHOUSE_DUAL_WRITE:
+        return
+
+    try:
+        for point in points:
+            if point.get("measurement") != "DailyStats":
+                continue
+
+            value = point.get("time")
+            if isinstance(value, datetime):
+                timestamp = value
+            else:
+                timestamp = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+
+            if timestamp.tzinfo is not None:
+                timestamp = timestamp.astimezone(pytz.UTC).replace(tzinfo=None)
+
+            timestamp = timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+            query = (
+                f"SELECT count() FROM `{CLICKHOUSE_DATABASE}`.`DailyStats` "
+                f"WHERE time = toDateTime64('{timestamp}', 9, 'UTC')"
+            )
+
+            response = requests.post(
+                f"http://{CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/",
+                params={"query": query},
+                auth=(CLICKHOUSE_USER, CLICKHOUSE_PASSWORD),
+                timeout=30,
+            )
+            response.raise_for_status()
+
+            if int(response.text.strip()) != 0:
+                continue
+
+            row = {}
+            row.update(point.get("tags", {}))
+            row.update(point.get("fields", {}))
+            row["time"] = timestamp
+
+            response = requests.post(
+                f"http://{CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/",
+                params={
+                    "query": f"INSERT INTO `{CLICKHOUSE_DATABASE}`.`DailyStats` FORMAT JSONEachRow",
+                    "input_format_skip_unknown_fields": "1",
+                },
+                data=json.dumps(row, separators=(",", ":")),
+                auth=(CLICKHOUSE_USER, CLICKHOUSE_PASSWORD),
+                timeout=30,
+            )
+            response.raise_for_status()
+
+            logging.info("Success : updated ClickHouse DailyStats")
+
+    except (requests.RequestException, ValueError) as err:
+        logging.error("Write failed : Unable to update ClickHouse DailyStats! " + str(err))
+
+
 def write_points_to_influxdb(points):
     write_chunk_size = 20000
     try:
@@ -205,6 +271,7 @@ def write_points_to_influxdb(points):
                 else:
                     influxdbclient.write(record=points[i:i + write_chunk_size])
             logging.info("Success : updated influxDB database with new points")
+            write_daily_stats_to_clickhouse(points)
     except (InfluxDBClientError, InfluxDBError) as err:
         logging.error("Write failed : Unable to connect with database! " + str(err))
 
