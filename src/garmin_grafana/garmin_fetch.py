@@ -1912,13 +1912,30 @@ if __name__ == "__main__":
         exit(0)
     else:
         try:
-            if INFLUXDB_VERSION == "1":
+            if CLICKHOUSE_DUAL_WRITE:
+                response = requests.post(
+                    f"http://{CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/",
+                    params={
+                        "query": (
+                            f"SELECT formatDateTime(max(time), '%Y-%m-%d %H:%i:%S') "
+                            f"FROM `{CLICKHOUSE_DATABASE}`.`HeartRateIntraday`"
+                        )
+                    },
+                    auth=(CLICKHOUSE_USER, CLICKHOUSE_PASSWORD),
+                    timeout=30,
+                )
+                response.raise_for_status()
+                latest = response.text.strip()
+                last_influxdb_sync_time_UTC = pytz.utc.localize(
+                    datetime.strptime(latest, "%Y-%m-%d %H:%M:%S")
+                )
+            elif INFLUXDB_VERSION == "1":
                 last_influxdb_sync_time_UTC = pytz.utc.localize(datetime.strptime(list(influxdbclient.query(f"SELECT * FROM HeartRateIntraday ORDER BY time DESC LIMIT 1").get_points())[0]['time'],"%Y-%m-%dT%H:%M:%SZ"))
             else:
                 last_influxdb_sync_time_UTC = pytz.utc.localize(influxdbclient.query(query="SELECT * FROM HeartRateIntraday ORDER BY time DESC LIMIT 1", language="influxql").to_pylist()[0]['time'])
         except Exception as err:
             logging.error(err)
-            logging.warning("No previously synced data found in local InfluxDB database, defaulting to 7 day initial fetching. Use specific start date ENV variable to bulk update past data")
+            logging.warning("No previously synced data found, defaulting to 7 day initial fetching. Use specific start date ENV variable to bulk update past data")
             last_influxdb_sync_time_UTC = (datetime.today() - timedelta(days=7)).astimezone(pytz.timezone("UTC"))
         try:
             if USER_TIMEZONE: # If provided by user, using that. 
