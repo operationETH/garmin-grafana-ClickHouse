@@ -198,13 +198,21 @@ def _is_http_status_error(err, status_code):
     return re.search(rf"\b{status_code}\b", str(err)) is not None
 
 # %%
-def write_daily_stats_to_clickhouse(points):
+def write_points_to_clickhouse(points):
     if not CLICKHOUSE_DUAL_WRITE:
         return
 
+    measurements = {
+        "DailyStats": ("DailyStats", ("time_ns",)),
+        "HeartRateIntraday": ("HeartRateIntraday", ("time_ns", "Device")),
+    }
+
     try:
+        grouped = {}
+
         for point in points:
-            if point.get("measurement") != "DailyStats":
+            measurement = point.get("measurement")
+            if measurement not in measurements:
                 continue
 
             value = point.get("time")
@@ -216,12 +224,55 @@ def write_daily_stats_to_clickhouse(points):
             if timestamp.tzinfo is not None:
                 timestamp = timestamp.astimezone(pytz.UTC).replace(tzinfo=None)
 
-            timestamp = timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")
-
-            query = (
-                f"SELECT count() FROM `{CLICKHOUSE_DATABASE}`.`DailyStats` "
-                f"WHERE time = toDateTime64('{timestamp}', 9, 'UTC')"
+            delta = timestamp - datetime(1970, 1, 1)
+            time_ns = (
+                (delta.days * 86400 + delta.seconds) * 1000000000
+                + delta.microseconds * 1000
             )
+
+            row = {}
+            row.update(point.get("tags", {}))
+            row.update(point.get("fields", {}))
+            row["time"] = timestamp.strftime("%Y-%m-%d %H:%M:%S.%f")
+
+            grouped.setdefault(measurement, []).append((time_ns, row))
+
+        for measurement, entries in grouped.items():
+            table, key_fields = measurements[measurement]
+
+            incoming = {}
+            for time_ns, row in entries:
+                key_values = {
+                    "time_ns": time_ns,
+                    "Device": row.get("Device"),
+                }
+                key = tuple(key_values[field] for field in key_fields)
+                incoming[key] = row
+
+            rows = list(incoming.items())
+            if not rows:
+                continue
+
+            timestamps = [row["time"] for _, row in rows]
+            first_time = min(timestamps)
+            last_time = max(timestamps)
+
+            if measurement == "HeartRateIntraday":
+                query = (
+                    f"SELECT toUnixTimestamp64Nano(time) AS time_ns, Device "
+                    f"FROM `{CLICKHOUSE_DATABASE}`.`{table}` "
+                    f"WHERE time >= toDateTime64('{first_time}', 9, 'UTC') "
+                    f"AND time <= toDateTime64('{last_time}', 9, 'UTC') "
+                    "FORMAT JSONEachRow"
+                )
+            else:
+                query = (
+                    f"SELECT toUnixTimestamp64Nano(time) AS time_ns "
+                    f"FROM `{CLICKHOUSE_DATABASE}`.`{table}` "
+                    f"WHERE time >= toDateTime64('{first_time}', 9, 'UTC') "
+                    f"AND time <= toDateTime64('{last_time}', 9, 'UTC') "
+                    "FORMAT JSONEachRow"
+                )
 
             response = requests.post(
                 f"http://{CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/",
@@ -231,31 +282,50 @@ def write_daily_stats_to_clickhouse(points):
             )
             response.raise_for_status()
 
-            if int(response.text.strip()) != 0:
+            existing = set()
+
+            for line in response.text.splitlines():
+                if not line.strip():
+                    continue
+                item = json.loads(line)
+                key_values = {
+                    "time_ns": int(item["time_ns"]),
+                    "Device": item.get("Device"),
+                }
+                existing.add(tuple(key_values[field] for field in key_fields))
+
+            pending = [
+                row
+                for key, row in rows
+                if key not in existing
+            ]
+
+            if not pending:
                 continue
 
-            row = {}
-            row.update(point.get("tags", {}))
-            row.update(point.get("fields", {}))
-            row["time"] = timestamp
+            payload = "\n".join(
+                json.dumps(row, separators=(",", ":"))
+                for row in pending
+            )
 
             response = requests.post(
                 f"http://{CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/",
                 params={
-                    "query": f"INSERT INTO `{CLICKHOUSE_DATABASE}`.`DailyStats` FORMAT JSONEachRow",
+                    "query": f"INSERT INTO `{CLICKHOUSE_DATABASE}`.`{table}` FORMAT JSONEachRow",
                     "input_format_skip_unknown_fields": "1",
                 },
-                data=json.dumps(row, separators=(",", ":")),
+                data=payload,
                 auth=(CLICKHOUSE_USER, CLICKHOUSE_PASSWORD),
                 timeout=30,
             )
             response.raise_for_status()
 
-            logging.info("Success : updated ClickHouse DailyStats")
+            logging.info(
+                f"Success : updated ClickHouse {measurement} with {len(pending)} new points"
+            )
 
-    except (requests.RequestException, ValueError) as err:
-        logging.error("Write failed : Unable to update ClickHouse DailyStats! " + str(err))
-
+    except (requests.RequestException, ValueError, json.JSONDecodeError) as err:
+        logging.error("Write failed : Unable to update ClickHouse! " + str(err))
 
 def write_points_to_influxdb(points):
     write_chunk_size = 20000
@@ -271,7 +341,7 @@ def write_points_to_influxdb(points):
                 else:
                     influxdbclient.write(record=points[i:i + write_chunk_size])
             logging.info("Success : updated influxDB database with new points")
-            write_daily_stats_to_clickhouse(points)
+            write_points_to_clickhouse(points)
     except (InfluxDBClientError, InfluxDBError) as err:
         logging.error("Write failed : Unable to connect with database! " + str(err))
 
