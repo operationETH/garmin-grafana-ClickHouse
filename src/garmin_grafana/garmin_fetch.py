@@ -203,8 +203,22 @@ def write_points_to_clickhouse(points):
         return
 
     measurements = {
+        "BodyBatteryIntraday": ("BodyBatteryIntraday", ("time_ns", "Device")),
+        "BodyComposition": ("BodyComposition", ("time_ns", "Device")),
+        "BreathingRateIntraday": ("BreathingRateIntraday", ("time_ns", "Device")),
         "DailyStats": ("DailyStats", ("time_ns",)),
+        "DeviceSync": ("DeviceSync", ("time_ns", "Device")),
+        "FitnessAge": ("FitnessAge", ("time_ns", "Device")),
+        "HRV_Intraday": ("HRV_Intraday", ("time_ns", "Device")),
         "HeartRateIntraday": ("HeartRateIntraday", ("time_ns", "Device")),
+        "HillScore": ("HillScore", ("time_ns", "Device")),
+        "Hydration": ("Hydration", ("time_ns", "Device")),
+        "SleepIntraday": ("SleepIntraday", ("metric_fields",)),
+        "SleepSummary": ("SleepSummary", ("time_ns", "Device")),
+        "SolarIntensity": ("SolarIntensity", ("time_ns", "Device")),
+        "StepsIntraday": ("StepsIntraday", ("time_ns", "Device")),
+        "StressIntraday": ("StressIntraday", ("time_ns", "Device")),
+        "TrainingReadiness": ("TrainingReadiness", ("time_ns", "Device")),
     }
 
     try:
@@ -240,34 +254,75 @@ def write_points_to_clickhouse(points):
         for measurement, entries in grouped.items():
             table, key_fields = measurements[measurement]
 
-            incoming = {}
-            for time_ns, row in entries:
+            def make_key(time_ns, row):
+                if key_fields == ("metric_fields",):
+                    metric_fields = tuple(
+                        sorted(
+                            key
+                            for key, value in row.items()
+                            if key not in {
+                                "time",
+                                "time_ns",
+                                "Device",
+                                "Database_Name",
+                                "User_ID",
+                            }
+                            and value is not None
+                        )
+                    )
+
+                    return (
+                        time_ns,
+                        row.get("Device"),
+                        metric_fields,
+                    )
+
                 key_values = {
                     "time_ns": time_ns,
                     "Device": row.get("Device"),
                 }
-                key = tuple(key_values[field] for field in key_fields)
-                incoming[key] = row
+
+                return tuple(
+                    key_values[field]
+                    for field in key_fields
+                )
+
+            incoming = {}
+
+            for time_ns, row in entries:
+                incoming[make_key(time_ns, row)] = row
 
             rows = list(incoming.items())
+
             if not rows:
                 continue
 
-            timestamps = [row["time"] for _, row in rows]
+            timestamps = [
+                row["time"]
+                for _, row in rows
+            ]
+
             first_time = min(timestamps)
             last_time = max(timestamps)
 
-            if measurement == "HeartRateIntraday":
+            if key_fields == ("metric_fields",):
                 query = (
-                    f"SELECT toUnixTimestamp64Nano(time) AS time_ns, Device "
+                    f"SELECT toUnixTimestamp64Nano(time) AS time_ns, * "
                     f"FROM `{CLICKHOUSE_DATABASE}`.`{table}` "
                     f"WHERE time >= toDateTime64('{first_time}', 9, 'UTC') "
                     f"AND time <= toDateTime64('{last_time}', 9, 'UTC') "
                     "FORMAT JSONEachRow"
                 )
             else:
+                select_fields = [
+                    "toUnixTimestamp64Nano(time) AS time_ns"
+                ]
+
+                if "Device" in key_fields:
+                    select_fields.append("Device")
+
                 query = (
-                    f"SELECT toUnixTimestamp64Nano(time) AS time_ns "
+                    f"SELECT {', '.join(select_fields)} "
                     f"FROM `{CLICKHOUSE_DATABASE}`.`{table}` "
                     f"WHERE time >= toDateTime64('{first_time}', 9, 'UTC') "
                     f"AND time <= toDateTime64('{last_time}', 9, 'UTC') "
@@ -287,12 +342,29 @@ def write_points_to_clickhouse(points):
             for line in response.text.splitlines():
                 if not line.strip():
                     continue
+
                 item = json.loads(line)
+
+                if key_fields == ("metric_fields",):
+                    existing.add(
+                        make_key(
+                            int(item["time_ns"]),
+                            item,
+                        )
+                    )
+                    continue
+
                 key_values = {
                     "time_ns": int(item["time_ns"]),
                     "Device": item.get("Device"),
                 }
-                existing.add(tuple(key_values[field] for field in key_fields))
+
+                existing.add(
+                    tuple(
+                        key_values[field]
+                        for field in key_fields
+                    )
+                )
 
             pending = [
                 row
