@@ -4,13 +4,14 @@
 
 # Grafana for Garmin Dashboard
 
-A docker container to fetch data from Garmin servers and store the data in a local influxdb database for appealing visualization with Grafana.
+A Docker container to fetch health and activity data from Garmin Connect for storage and visualization with Grafana.
+
+> [!NOTICE]
+> This fork is currently under active development and is not fully tested. Do NOT use this project for production deployments yet. The ClickHouse migration and related changes are still being validated. Please wait for the initial release before using this fork. This project is based on the original garmin-grafana project by Arpan Ghosh and remains licensed under the BSD 3-Clause License.
+
 
 > [!IMPORTANT]
 > Garmin is a registered trademark of Garmin Ltd. or its subsidiaries. Grafana is a registered trademark of Grafana Labs. This project is an independent, open-source tool and is not affiliated with, endorsed by, sponsored by, or approved by Garmin Ltd. or Grafana Labs.
-
-> [!NOTE]
-> This project repository is dynamically mirrored in [Codeberg](https://codeberg.org/arpanghosh8453/garmin-grafana) as a backup. An alternative docker image is available at [codeberg.org/arpanghosh8453/garmin-grafana](https://codeberg.org/arpanghosh8453/-/packages/container/garmin-grafana).
 
 > [!TIP]
 > If you are a **Fitbit user**, please check out the [sister project](https://github.com/arpanghosh8453/fitbit-grafana) made for Fitbit
