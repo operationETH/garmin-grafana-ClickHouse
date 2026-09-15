@@ -6,7 +6,7 @@
 
 A Docker container to fetch health and activity data from Garmin Connect for storage and visualization with Grafana.
 
-> [!NOTICE]
+> [!CAUTION]
 > This fork is currently under active development and is not fully tested. Do NOT use this project for production deployments yet. The ClickHouse migration and related changes are still being validated. Please wait for the initial release before using this fork. This project is based on the original garmin-grafana project by Arpan Ghosh and remains licensed under the BSD 3-Clause License.
 
 
