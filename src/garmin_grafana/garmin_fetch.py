@@ -209,22 +209,37 @@ def write_points_to_clickhouse(points):
         return
 
     measurements = {
-        "BodyBatteryIntraday": ("BodyBatteryIntraday", ("time_ns", "Device")),
-        "BodyComposition": ("BodyComposition", ("time_ns", "Device")),
-        "BreathingRateIntraday": ("BreathingRateIntraday", ("time_ns", "Device")),
-        "DailyStats": ("DailyStats", ("time_ns",)),
-        "DeviceSync": ("DeviceSync", ("time_ns", "Device")),
-        "FitnessAge": ("FitnessAge", ("time_ns", "Device")),
-        "HRV_Intraday": ("HRV_Intraday", ("time_ns", "Device")),
-        "HeartRateIntraday": ("HeartRateIntraday", ("time_ns", "Device")),
-        "HillScore": ("HillScore", ("time_ns", "Device")),
-        "Hydration": ("Hydration", ("time_ns", "Device")),
-        "SleepIntraday": ("SleepIntraday", ("metric_fields",)),
-        "SleepSummary": ("SleepSummary", ("time_ns", "Device")),
-        "SolarIntensity": ("SolarIntensity", ("time_ns", "Device")),
-        "StepsIntraday": ("StepsIntraday", ("time_ns", "Device")),
-        "StressIntraday": ("StressIntraday", ("time_ns", "Device")),
-        "TrainingReadiness": ("TrainingReadiness", ("time_ns", "Device")),
+        "ActivityGPS": ("ActivityGPS", ("Device", "Database_Name", "ActivityID", "ActivitySelector")),
+        "ActivityLap": ("ActivityLap", ("Device", "Database_Name", "ActivityID", "ActivitySelector")),
+        "ActivityLength": ("ActivityLength", ("Device", "Database_Name", "ActivityID", "ActivitySelector")),
+        "ActivitySession": ("ActivitySession", ("Device", "Database_Name", "ActivityID", "ActivitySelector")),
+        "ActivitySummary": ("ActivitySummary", ("Device", "Database_Name", "ActivityID", "ActivitySelector")),
+        "BloodPressure": ("BloodPressure", ("Device", "Database_Name", "Source")),
+        "BodyBatteryIntraday": ("BodyBatteryIntraday", ("Device", "Database_Name")),
+        "BodyComposition": ("BodyComposition", ("Device", "Database_Name", "Frequency", "SourceType")),
+        "BreathingRateIntraday": ("BreathingRateIntraday", ("Device", "Database_Name")),
+        "CyclingDynamics": ("CyclingDynamics", ("Device", "Database_Name", "ActivityID", "ActivitySelector")),
+        "DailyStats": ("DailyStats", ("Device", "Database_Name")),
+        "DeviceSync": ("DeviceSync", ("Device", "Database_Name")),
+        "EnduranceScore": ("EnduranceScore", ("Device", "Database_Name")),
+        "FitnessAge": ("FitnessAge", ("Device", "Database_Name")),
+        "HRV_Intraday": ("HRV_Intraday", ("Device", "Database_Name")),
+        "HeartRateIntraday": ("HeartRateIntraday", ("Device", "Database_Name")),
+        "HillScore": ("HillScore", ("Device", "Database_Name")),
+        "Hydration": ("Hydration", ("Device", "Database_Name")),
+        "LactateThreshold": ("LactateThreshold", ("Device", "Database_Name")),
+        "LifestyleJournal": ("LifestyleJournal", ("Device", "Database_Name", "behavior", "category")),
+        "RacePredictions": ("RacePredictions", ("Device", "Database_Name")),
+        "SleepIntraday": ("SleepIntraday", ("Device", "Database_Name")),
+        "SleepSummary": ("SleepSummary", ("Device", "Database_Name")),
+        "SolarIntensity": ("SolarIntensity", ("Device", "Database_Name")),
+        "StepsIntraday": ("StepsIntraday", ("Device", "Database_Name")),
+        "StrengthExerciseSet": ("StrengthExerciseSet", ("Device", "Database_Name", "ActivityID", "ActivitySelector", "ExerciseCategory", "ExerciseLabel")),
+        "StrengthHRZones": ("StrengthHRZones", ("Device", "Database_Name", "ActivityID", "ActivitySelector")),
+        "StressIntraday": ("StressIntraday", ("Device", "Database_Name")),
+        "TrainingReadiness": ("TrainingReadiness", ("Device", "Database_Name")),
+        "TrainingStatus": ("TrainingStatus", ("Device", "Database_Name")),
+        "VO2_Max": ("VO2_Max", ("Device", "Database_Name")),
     }
 
     try:
@@ -258,45 +273,23 @@ def write_points_to_clickhouse(points):
             grouped.setdefault(measurement, []).append((time_ns, row))
 
         for measurement, entries in grouped.items():
-            table, key_fields = measurements[measurement]
-
-            def make_key(time_ns, row):
-                if key_fields == ("metric_fields",):
-                    metric_fields = tuple(
-                        sorted(
-                            key
-                            for key, value in row.items()
-                            if key not in {
-                                "time",
-                                "time_ns",
-                                "Device",
-                                "Database_Name",
-                                "User_ID",
-                            }
-                            and value is not None
-                        )
-                    )
-
-                    return (
-                        time_ns,
-                        row.get("Device"),
-                        metric_fields,
-                    )
-
-                key_values = {
-                    "time_ns": time_ns,
-                    "Device": row.get("Device"),
-                }
-
-                return tuple(
-                    key_values[field]
-                    for field in key_fields
-                )
+            table, tag_fields = measurements[measurement]
 
             incoming = {}
 
             for time_ns, row in entries:
-                incoming[make_key(time_ns, row)] = row
+                key = (
+                    time_ns,
+                    *(
+                        row.get(field)
+                        for field in tag_fields
+                    ),
+                )
+
+                if key not in incoming:
+                    incoming[key] = row
+                else:
+                    incoming[key].update(row)
 
             rows = list(incoming.items())
 
@@ -311,29 +304,18 @@ def write_points_to_clickhouse(points):
             first_time = min(timestamps)
             last_time = max(timestamps)
 
-            if key_fields == ("metric_fields",):
-                query = (
-                    f"SELECT toUnixTimestamp64Nano(time) AS time_ns, * "
-                    f"FROM `{CLICKHOUSE_DATABASE}`.`{table}` "
-                    f"WHERE time >= toDateTime64('{first_time}', 9, 'UTC') "
-                    f"AND time <= toDateTime64('{last_time}', 9, 'UTC') "
-                    "FORMAT JSONEachRow"
-                )
-            else:
-                select_fields = [
-                    "toUnixTimestamp64Nano(time) AS time_ns"
-                ]
+            select_fields = [
+                "toUnixTimestamp64Nano(time) AS time_ns",
+                *tag_fields,
+            ]
 
-                if "Device" in key_fields:
-                    select_fields.append("Device")
-
-                query = (
-                    f"SELECT {', '.join(select_fields)} "
-                    f"FROM `{CLICKHOUSE_DATABASE}`.`{table}` "
-                    f"WHERE time >= toDateTime64('{first_time}', 9, 'UTC') "
-                    f"AND time <= toDateTime64('{last_time}', 9, 'UTC') "
-                    "FORMAT JSONEachRow"
-                )
+            query = (
+                f"SELECT {', '.join(select_fields)} "
+                f"FROM `{CLICKHOUSE_DATABASE}`.`{table}` "
+                f"WHERE time >= toDateTime64('{first_time}', 9, 'UTC') "
+                f"AND time <= toDateTime64('{last_time}', 9, 'UTC') "
+                "FORMAT JSONEachRow"
+            )
 
             response = requests.post(
                 f"http://{CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/",
@@ -351,24 +333,13 @@ def write_points_to_clickhouse(points):
 
                 item = json.loads(line)
 
-                if key_fields == ("metric_fields",):
-                    existing.add(
-                        make_key(
-                            int(item["time_ns"]),
-                            item,
-                        )
-                    )
-                    continue
-
-                key_values = {
-                    "time_ns": int(item["time_ns"]),
-                    "Device": item.get("Device"),
-                }
-
                 existing.add(
-                    tuple(
-                        key_values[field]
-                        for field in key_fields
+                    (
+                        int(item["time_ns"]),
+                        *(
+                            item.get(field)
+                            for field in tag_fields
+                        ),
                     )
                 )
 
@@ -391,6 +362,7 @@ def write_points_to_clickhouse(points):
                 params={
                     "query": f"INSERT INTO `{CLICKHOUSE_DATABASE}`.`{table}` FORMAT JSONEachRow",
                     "input_format_skip_unknown_fields": "1",
+                    "input_format_json_read_numbers_as_strings": "1",
                 },
                 data=payload,
                 auth=(CLICKHOUSE_USER, CLICKHOUSE_PASSWORD),
