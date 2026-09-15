@@ -64,6 +64,7 @@ FETCH_FAILED_WAIT_SECONDS = int(os.getenv("FETCH_FAILED_WAIT_SECONDS", 1800)) # 
 RATE_LIMIT_CALLS_SECONDS = int(os.getenv("RATE_LIMIT_CALLS_SECONDS", 5)) # optional
 MAX_CONSECUTIVE_500_ERRORS = int(os.getenv("MAX_CONSECUTIVE_500_ERRORS", 10)) # optional, maximum consecutive HTTP 500 errors before continuing without retrying
 INFLUXDB_ENDPOINT_IS_HTTP = False if os.getenv("INFLUXDB_ENDPOINT_IS_HTTP") in ['False','false','FALSE','f','F','no','No','NO','0'] else True # optional
+INFLUXDB_WRITE_ENABLED = False if os.getenv("INFLUXDB_WRITE_ENABLED") in ['False','false','FALSE','f','F','no','No','NO','0'] else True
 GARMIN_DEVICENAME_AUTOMATIC = False if GARMIN_DEVICENAME != "Unknown" else True # optional
 UPDATE_INTERVAL_SECONDS = int(os.getenv("UPDATE_INTERVAL_SECONDS", 300)) # optional
 FETCH_SELECTION = os.getenv("FETCH_SELECTION", "daily_avg,sleep,steps,heartrate,stress,breathing,hrv,fitness_age,vo2,activity,race_prediction,body_composition,lifestyle") # additional available values are lactate_threshold,training_status,training_readiness,hill_score,endurance_score,blood_pressure,hydration,solar_intensity,cycling_dynamics which you can add to the list seperated by , without any space
@@ -93,43 +94,48 @@ logging.basicConfig(
 )
 
 # %%
-try:
-    if INFLUXDB_ENDPOINT_IS_HTTP:
-        if INFLUXDB_VERSION == '1':
-            influxdbclient = InfluxDBClient(host=INFLUXDB_HOST, port=INFLUXDB_PORT, username=INFLUXDB_USERNAME, password=INFLUXDB_PASSWORD)
-            influxdbclient.switch_database(INFLUXDB_DATABASE)
+influxdbclient = None
+
+if INFLUXDB_WRITE_ENABLED:
+    try:
+        if INFLUXDB_ENDPOINT_IS_HTTP:
+            if INFLUXDB_VERSION == '1':
+                influxdbclient = InfluxDBClient(host=INFLUXDB_HOST, port=INFLUXDB_PORT, username=INFLUXDB_USERNAME, password=INFLUXDB_PASSWORD)
+                influxdbclient.switch_database(INFLUXDB_DATABASE)
+            else:
+                influxdbclient = InfluxDBClient3(
+                    host=f"http://{INFLUXDB_HOST}:{INFLUXDB_PORT}",
+                    token=INFLUXDB_V3_ACCESS_TOKEN,
+                    org=INFLUXDB_ORG,
+                    database=INFLUXDB_DATABASE
+                )
         else:
-            influxdbclient = InfluxDBClient3(
-            host=f"http://{INFLUXDB_HOST}:{INFLUXDB_PORT}",
-            token=INFLUXDB_V3_ACCESS_TOKEN,
-            org=INFLUXDB_ORG,
-            database=INFLUXDB_DATABASE
-            )
-    else:
+            if INFLUXDB_VERSION == '1':
+                influxdbclient = InfluxDBClient(host=INFLUXDB_HOST, port=INFLUXDB_PORT, username=INFLUXDB_USERNAME, password=INFLUXDB_PASSWORD, ssl=True, verify_ssl=True)
+                influxdbclient.switch_database(INFLUXDB_DATABASE)
+            else:
+                influxdbclient = InfluxDBClient3(
+                    host=f"https://{INFLUXDB_HOST}:{INFLUXDB_PORT}",
+                    token=INFLUXDB_V3_ACCESS_TOKEN,
+                    org=INFLUXDB_ORG,
+                    database=INFLUXDB_DATABASE
+                )
+
+        demo_point = {
+            'measurement': 'DemoPoint',
+            'time': (datetime.now(pytz.utc) - timedelta(minutes=1)).isoformat(timespec='seconds'),
+            'tags': {'DemoTag': 'DemoTagValue'},
+            'fields': {'DemoField': 0}
+        }
+
         if INFLUXDB_VERSION == '1':
-            influxdbclient = InfluxDBClient(host=INFLUXDB_HOST, port=INFLUXDB_PORT, username=INFLUXDB_USERNAME, password=INFLUXDB_PASSWORD, ssl=True, verify_ssl=True)
-            influxdbclient.switch_database(INFLUXDB_DATABASE)
+            influxdbclient.write_points([demo_point])
         else:
-            influxdbclient = InfluxDBClient3(
-            host=f"https://{INFLUXDB_HOST}:{INFLUXDB_PORT}",
-            token=INFLUXDB_V3_ACCESS_TOKEN,
-            org=INFLUXDB_ORG,
-            database=INFLUXDB_DATABASE
-            )
-    demo_point = {
-    'measurement': 'DemoPoint',
-    'time': (datetime.now(pytz.utc) - timedelta(minutes=1)).isoformat(timespec='seconds'),
-    'tags': {'DemoTag': 'DemoTagValue'},
-    'fields': {'DemoField': 0}
-     }
-    # The following code block tests the connection by writing/overwriting a demo point. raises error and aborts if connection fails. 
-    if INFLUXDB_VERSION == '1':
-        influxdbclient.write_points([demo_point])
-    else:
-        influxdbclient.write(record=[demo_point])
-except (InfluxDBClientError, InfluxDBError) as err:
-    logging.error("Unable to connect with influxdb database! Aborted")
-    raise InfluxDBClientError("InfluxDB connection failed:" + str(err))
+            influxdbclient.write(record=[demo_point])
+
+    except (InfluxDBClientError, InfluxDBError) as err:
+        logging.error("Unable to connect with influxdb database! Aborted")
+        raise InfluxDBClientError("InfluxDB connection failed:" + str(err))
 
 # %%
 def iter_days(start_date: str, end_date: str):
@@ -401,21 +407,28 @@ def write_points_to_clickhouse(points):
 
 def write_points_to_influxdb(points):
     write_chunk_size = 20000
-    try:
-        if len(points) != 0:
-            if TAG_MEASUREMENTS_WITH_USER_EMAIL:
-                for item in points:
-                    item['tags'].update({'User_ID': garmin_obj.display_name or 'Unknown'})
-            # Write in chunks - Issue reported for large activities data containing >20000 points - Error 413 : payload too large
+
+    if len(points) == 0:
+        return
+
+    if TAG_MEASUREMENTS_WITH_USER_EMAIL:
+        for item in points:
+            item['tags'].update({'User_ID': garmin_obj.display_name or 'Unknown'})
+
+    if INFLUXDB_WRITE_ENABLED:
+        try:
             for i in range(0, len(points), write_chunk_size):
                 if INFLUXDB_VERSION == '1':
                     influxdbclient.write_points(points[i:i + write_chunk_size])
                 else:
                     influxdbclient.write(record=points[i:i + write_chunk_size])
+
             logging.info("Success : updated influxDB database with new points")
-            write_points_to_clickhouse(points)
-    except (InfluxDBClientError, InfluxDBError) as err:
-        logging.error("Write failed : Unable to connect with database! " + str(err))
+
+        except (InfluxDBClientError, InfluxDBError) as err:
+            logging.error("Write failed : Unable to connect with database! " + str(err))
+
+    write_points_to_clickhouse(points)
 
 # %%
 def get_daily_stats(date_str):
@@ -966,6 +979,9 @@ def purge_existing_strength_exercise_sets(activity_id):
     previous series first, InfluxDB keeps the stale and corrected rows in
     parallel because the tags no longer match.
     """
+    if not INFLUXDB_WRITE_ENABLED:
+        return True
+
     if INFLUXDB_VERSION != '1':
         logging.warning(
             f"InfluxDB version {INFLUXDB_VERSION} does not support purging StrengthExerciseSet series for activity {activity_id}. "
