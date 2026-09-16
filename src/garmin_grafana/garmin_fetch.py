@@ -296,6 +296,35 @@ def write_points_to_clickhouse(points):
             if not rows:
                 continue
 
+            if measurement == "DailyStats":
+                for _, row in rows:
+                    conditions = [
+                        f"time = toDateTime64('{row['time']}', 9, 'UTC')"
+                    ]
+
+                    for field in tag_fields:
+                        value = row.get(field)
+
+                        if value is None:
+                            conditions.append(f"`{field}` IS NULL")
+                        else:
+                            escaped = str(value).replace("\\", "\\\\").replace("'", "\\'")
+                            conditions.append(f"`{field}` = '{escaped}'")
+
+                    response = requests.post(
+                        f"http://{CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/",
+                        params={
+                            "query": (
+                                f"ALTER TABLE `{CLICKHOUSE_DATABASE}`.`{table}` "
+                                f"DELETE WHERE {' AND '.join(conditions)} "
+                                "SETTINGS mutations_sync = 1"
+                            )
+                        },
+                        auth=(CLICKHOUSE_USER, CLICKHOUSE_PASSWORD),
+                        timeout=30,
+                    )
+                    response.raise_for_status()
+
             timestamps = [
                 row["time"]
                 for _, row in rows
